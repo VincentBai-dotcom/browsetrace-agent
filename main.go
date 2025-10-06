@@ -1,4 +1,4 @@
-package browsetrace_agent
+package main
 
 import (
 	"encoding/json"
