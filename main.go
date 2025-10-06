@@ -2,6 +2,7 @@ package main
 
 import (
 	"encoding/json"
+	"fmt"
 	"log"
 	"net/http"
 	"os"
@@ -29,6 +30,7 @@ func main() {
 			log.SetOutput(f)
 			log.Println(e.Type)
 		}
+		fmt.Println(events)
 		w.WriteHeader(204)
 	})
 	log.Fatal(http.ListenAndServe("127.0.0.1:51425", nil))
