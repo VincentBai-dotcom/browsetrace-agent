@@ -133,29 +133,29 @@ func main() {
 	}
 
 	mux := http.NewServeMux()
-	mux.HandleFunc("/healthz", func(responseWriter http.ResponseWriter, _ *http.Request) {
-		responseWriter.Write([]byte("ok"))
+	mux.HandleFunc("/healthz", func(w http.ResponseWriter, _ *http.Request) {
+		w.Write([]byte("ok"))
 	})
-	mux.HandleFunc("/events", func(responseWriter http.ResponseWriter, request *http.Request) {
+	mux.HandleFunc("/events", func(w http.ResponseWriter, request *http.Request) {
 		if request.Method != http.MethodPost {
-			http.Error(responseWriter, "POST only", http.StatusMethodNotAllowed)
+			http.Error(w, "POST only", http.StatusMethodNotAllowed)
 			return
 		}
 		var batch Batch
 		if err := json.NewDecoder(request.Body).Decode(&batch); err != nil {
-			http.Error(responseWriter, "Invalid JSON format", http.StatusBadRequest)
+			http.Error(w, "Invalid JSON format", http.StatusBadRequest)
 			return
 		}
 		if len(batch.Events) == 0 {
-			responseWriter.WriteHeader(http.StatusNoContent)
+			w.WriteHeader(http.StatusNoContent)
 			return
 		}
 		if err := insertEvents(batch.Events); err != nil {
 			log.Printf("Database error: %v", err)
-			http.Error(responseWriter, "Failed to store events", http.StatusInternalServerError)
+			http.Error(w, "Failed to store events", http.StatusInternalServerError)
 			return
 		}
-		responseWriter.WriteHeader(http.StatusNoContent) // success, no body
+		w.WriteHeader(http.StatusNoContent) // success, no body
 	})
 
 	server := &http.Server{
