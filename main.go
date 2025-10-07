@@ -1,24 +1,28 @@
 package main
 
 import (
+	"context"
 	"database/sql"
 	"encoding/json"
+	"fmt"
 	"log"
 	"net/http"
 	"os"
+	"os/signal"
 	"path/filepath"
+	"syscall"
 	"time"
 
 	_ "modernc.org/sqlite" // CGO-free SQLite
 )
 
 type Event struct {
-	TSUTC int64          `json:"ts_utc" :"tsutc"`
-	TSISO string         `json:"ts_iso" :"tsiso"`
-	URL   string         `json:"url" :"url"`
-	Title *string        `json:"title" :"title"` // nullable
-	Type  string         `json:"type" :"type"`   // navigate|visible_text|click|input|scroll|focus
-	Data  map[string]any `json:"data" :"data"`   // arbitrary JSON
+	TSUTC int64          `json:"ts_utc"`
+	TSISO string         `json:"ts_iso"`
+	URL   string         `json:"url"`
+	Title *string        `json:"title"` // nullable
+	Type  string         `json:"type"`  // navigate|visible_text|click|input|scroll|focus
+	Data  map[string]any `json:"data"`  // arbitrary JSON
 }
 
 type Batch struct {
@@ -27,19 +31,23 @@ type Batch struct {
 
 func main() {
 	// app data dir: ~/Library/Application Support/BrowserTrace/events.db
-	home, _ := os.UserHomeDir()
-	appDir := filepath.Join(home, "Library", "Application Support", "BrowserTrace")
-	_ = os.MkdirAll(appDir, 0o755)
-	dbPath := filepath.Join(appDir, "events.db")
-
-	// WAL + busy timeout to avoid “database is locked”
-	db, err := sql.Open("sqlite", dbPath+"?_journal_mode=WAL&_busy_timeout=5000")
+	homeDirectory, err := os.UserHomeDir()
 	if err != nil {
-		log.Fatal(err)
+		log.Fatal("Failed to get user home directory:", err)
+	}
+	applicationDirectory := filepath.Join(homeDirectory, "Library", "Application Support", "BrowserTrace")
+	if err := os.MkdirAll(applicationDirectory, 0o755); err != nil {
+		log.Fatal("Failed to create application directory:", err)
+	}
+	databasePath := filepath.Join(applicationDirectory, "events.db")
+
+	// WAL + busy timeout to avoid "database is locked"
+	db, err := sql.Open("sqlite", databasePath+"?_journal_mode=WAL&_busy_timeout=5000")
+	if err != nil {
+		log.Fatal("Failed to open database:", err)
 	}
 	defer db.Close()
 
-	// Schema from your design doc
 	_, err = db.Exec(`
 	CREATE TABLE IF NOT EXISTS events(
 	  id        INTEGER PRIMARY KEY,
@@ -55,60 +63,128 @@ func main() {
 	CREATE INDEX IF NOT EXISTS idx_events_url  ON events(url);
 	`)
 	if err != nil {
-		log.Fatal(err)
+		log.Fatal("Failed to create database tables:", err)
 	}
 
-	ins := func(evts []Event) error {
-		tx, err := db.Begin()
-		if err != nil {
-			return err
-		}
-		stmt, err := tx.Prepare(`INSERT INTO events(ts_utc, ts_iso, url, title, type, data_json) VALUES(?,?,?,?,?,json(?))`)
-		if err != nil {
-			_ = tx.Rollback()
-			return err
-		}
-		defer stmt.Close()
+	// Input validation helpers
+	validEventTypes := map[string]bool{
+		"navigate":     true,
+		"visible_text": true,
+		"click":        true,
+		"input":        true,
+		"scroll":       true,
+		"focus":        true,
+	}
 
-		for _, e := range evts {
-			j, _ := json.Marshal(e.Data)
-			if _, err := stmt.Exec(e.TSUTC, e.TSISO, e.URL, e.Title, e.Type, string(j)); err != nil {
-				_ = tx.Rollback()
-				return err
+	validateEvent := func(event Event) error {
+		if event.URL == "" {
+			return fmt.Errorf("URL cannot be empty")
+		}
+		if event.Type == "" {
+			return fmt.Errorf("Type cannot be empty")
+		}
+		if !validEventTypes[event.Type] {
+			return fmt.Errorf("invalid event type: %s", event.Type)
+		}
+		if event.TSUTC <= 0 {
+			return fmt.Errorf("timestamp must be positive")
+		}
+		return nil
+	}
+
+	insertEvents := func(events []Event) error {
+		transaction, err := db.Begin()
+		if err != nil {
+			return fmt.Errorf("failed to begin transaction: %w", err)
+		}
+		statement, err := transaction.Prepare(`INSERT INTO events(ts_utc, ts_iso, url, title, type, data_json) VALUES(?,?,?,?,?,json(?))`)
+		if err != nil {
+			_ = transaction.Rollback()
+			return fmt.Errorf("failed to prepare statement: %w", err)
+		}
+		defer statement.Close()
+
+		for _, event := range events {
+			if err := validateEvent(event); err != nil {
+				_ = transaction.Rollback()
+				return fmt.Errorf("invalid event: %w", err)
+			}
+
+			jsonData, err := json.Marshal(event.Data)
+			if err != nil {
+				_ = transaction.Rollback()
+				return fmt.Errorf("failed to marshal event data: %w", err)
+			}
+			if _, err := statement.Exec(event.TSUTC, event.TSISO, event.URL, event.Title, event.Type, string(jsonData)); err != nil {
+				_ = transaction.Rollback()
+				return fmt.Errorf("failed to execute statement: %w", err)
 			}
 		}
-		return tx.Commit()
+		if err := transaction.Commit(); err != nil {
+			return fmt.Errorf("failed to commit transaction: %w", err)
+		}
+		return nil
+	}
+
+	// Get server address from environment or use default
+	serverAddress := os.Getenv("BROWSETRACE_ADDRESS")
+	if serverAddress == "" {
+		serverAddress = "127.0.0.1:51425"
 	}
 
 	mux := http.NewServeMux()
-	mux.HandleFunc("/healthz", func(w http.ResponseWriter, _ *http.Request) { w.Write([]byte("ok")) })
-	mux.HandleFunc("/events", func(w http.ResponseWriter, r *http.Request) {
-		if r.Method != http.MethodPost {
-			http.Error(w, "POST only", http.StatusMethodNotAllowed)
+	mux.HandleFunc("/healthz", func(responseWriter http.ResponseWriter, _ *http.Request) {
+		responseWriter.Write([]byte("ok"))
+	})
+	mux.HandleFunc("/events", func(responseWriter http.ResponseWriter, request *http.Request) {
+		if request.Method != http.MethodPost {
+			http.Error(responseWriter, "POST only", http.StatusMethodNotAllowed)
 			return
 		}
-		var b Batch
-		if err := json.NewDecoder(r.Body).Decode(&b); err != nil {
-			http.Error(w, "bad json", 400)
+		var batch Batch
+		if err := json.NewDecoder(request.Body).Decode(&batch); err != nil {
+			http.Error(responseWriter, "Invalid JSON format", http.StatusBadRequest)
 			return
 		}
-		if len(b.Events) == 0 {
-			w.WriteHeader(204)
+		if len(batch.Events) == 0 {
+			responseWriter.WriteHeader(http.StatusNoContent)
 			return
 		}
-		if err := ins(b.Events); err != nil {
-			http.Error(w, "db error", 500)
+		if err := insertEvents(batch.Events); err != nil {
+			log.Printf("Database error: %v", err)
+			http.Error(responseWriter, "Failed to store events", http.StatusInternalServerError)
 			return
 		}
-		w.WriteHeader(204) // success, no body
+		responseWriter.WriteHeader(http.StatusNoContent) // success, no body
 	})
 
-	s := &http.Server{
-		Addr:         "127.0.0.1:51425",
+	server := &http.Server{
+		Addr:         serverAddress,
 		Handler:      mux,
 		ReadTimeout:  5 * time.Second,
 		WriteTimeout: 5 * time.Second,
 	}
-	log.Println("agent listening on 127.0.0.1:51425")
-	log.Fatal(s.ListenAndServe())
+
+	// Graceful shutdown
+	shutdownChannel := make(chan os.Signal, 1)
+	signal.Notify(shutdownChannel, syscall.SIGINT, syscall.SIGTERM)
+
+	go func() {
+		log.Printf("BrowserTrace agent listening on %s", serverAddress)
+		if err := server.ListenAndServe(); err != nil && err != http.ErrServerClosed {
+			log.Fatal("Server failed to start:", err)
+		}
+	}()
+
+	<-shutdownChannel
+	log.Println("Shutting down server...")
+
+	shutdownContext, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	defer cancel()
+
+	if err := server.Shutdown(shutdownContext); err != nil {
+		log.Fatal("Server forced to shutdown:", err)
+	}
+
+	log.Println("Server exited")
 }
