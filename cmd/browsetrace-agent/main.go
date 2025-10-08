@@ -4,18 +4,28 @@ import (
 	"log"
 	"os"
 	"path/filepath"
+	"runtime"
 
 	"github.com/vincentbai/browsetrace-agent/internal/database"
 	"github.com/vincentbai/browsetrace-agent/internal/server"
 )
 
 func main() {
-	// app data dir: ~/Library/Application Support/BrowserTrace/events.db
+	// app data dir: platform-specific
 	homeDirectory, err := os.UserHomeDir()
 	if err != nil {
 		log.Fatal("Failed to get user home directory:", err)
 	}
-	applicationDirectory := filepath.Join(homeDirectory, "Library", "Application Support", "BrowserTrace")
+
+	var applicationDirectory string
+	switch runtime.GOOS {
+	case "darwin":
+		applicationDirectory = filepath.Join(homeDirectory, "Library", "Application Support", "BrowserTrace")
+	case "windows":
+		applicationDirectory = filepath.Join(homeDirectory, "AppData", "Roaming", "BrowserTrace")
+	default: // linux and others
+		applicationDirectory = filepath.Join(homeDirectory, ".local", "share", "BrowserTrace")
+	}
 	if err := os.MkdirAll(applicationDirectory, 0o755); err != nil {
 		log.Fatal("Failed to create application directory:", err)
 	}

@@ -31,13 +31,13 @@ func (s *Server) handleHealthz(w http.ResponseWriter, _ *http.Request) {
 	w.Write([]byte("ok"))
 }
 
-func (s *Server) handleEvents(w http.ResponseWriter, request *http.Request) {
-	if request.Method != http.MethodPost {
+func (s *Server) handleEvents(w http.ResponseWriter, req *http.Request) {
+	if req.Method != http.MethodPost {
 		http.Error(w, "POST only", http.StatusMethodNotAllowed)
 		return
 	}
 	var batch models.Batch
-	if err := json.NewDecoder(request.Body).Decode(&batch); err != nil {
+	if err := json.NewDecoder(req.Body).Decode(&batch); err != nil {
 		http.Error(w, "Invalid JSON format", http.StatusBadRequest)
 		return
 	}
