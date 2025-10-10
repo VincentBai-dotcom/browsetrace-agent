@@ -41,7 +41,7 @@ func main() {
 	// Get server address from environment or use default
 	serverAddress := os.Getenv("BROWSETRACE_ADDRESS")
 	if serverAddress == "" {
-		serverAddress = "127.0.0.1:51425"
+		serverAddress = "127.0.0.1:8123"
 	}
 
 	// Initialize and start server
