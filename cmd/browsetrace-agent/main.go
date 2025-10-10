@@ -32,7 +32,7 @@ func main() {
 	databasePath := filepath.Join(applicationDirectory, "events.db")
 
 	// Initialize database
-	db, err := database.NewDatabase(databasePath
+	db, err := database.NewDatabase(databasePath)
 	if err != nil {
 		log.Fatal(err)
 	}
